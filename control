@@ -1,0 +1,12 @@
+Package: com.pixelomer.cgba4ios
+Name: CGBA4iOS
+Depends: mobilesubstrate, firmware (>=8.0)
+Version: 1.0
+Architecture: iphoneos-arm
+Description: Corrupt GameBoy games using GBA4iOS
+  This is a tweak that lets you corrupt GameBoy games using GBA4iOS. Just hold the game you want to corrupt and press "Corrupt Game".
+  Doesn't work well with GameBoy Advance games.
+  Requires iOS 8.0 or higher.
+Maintainer: PixelOmer
+Author: PixelOmer
+Section: Tweaks
