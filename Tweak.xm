@@ -85,71 +85,73 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 		if (inputSet.count == expectedTitlesSet.count) {
 			NSIndexPath *indexPath = cellIndexPath;
 			NSString *filepath = [self filepathForIndexPath:indexPath];
-			if (![[filepath stringByDeletingPathExtension] hasSuffix:suffix]) {
+			if (![[filepath.pathExtension lowercaseString] isEqualToString:@"zip"]) {
+				if (![[filepath stringByDeletingPathExtension] hasSuffix:suffix]) {
+					[vc addAction:[UIAlertAction
+						actionWithTitle:@"Duplicate & Corrupt"
+						style:UIAlertActionStyleDefault
+						handler:^(id action){
+							self.ignoreDirectoryContentChanges = YES;
+							FILE *in_c = fopen(filepath.UTF8String, "r");
+							if (!in_c) return;
+							NSFileHandle *in = [[NSFileHandle alloc] initWithFileDescriptor:fileno(in_c) closeOnDealloc:YES];
+							if (!in) {
+								fclose(in_c);
+								return;
+							}
+							NSString *outPath = [NSString stringWithFormat:@"%@/Corrupted %@%@.%@", filepath.stringByDeletingLastPathComponent, filepath.lastPathComponent.stringByDeletingPathExtension, suffix, filepath.pathExtension];
+							NSLog(@"Out: %@", outPath);
+							NSString *tmpPath = [outPath stringByAppendingPathExtension:@"tmp"];
+							[NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
+							[NSFileManager.defaultManager copyItemAtPath:filepath toPath:tmpPath error:nil];
+							char *tmpPath_c = (char *)malloc(strlen(tmpPath.UTF8String)+1);
+							strcpy(tmpPath_c, tmpPath.UTF8String);
+							FILE *out_c = fopen(tmpPath_c, "r+");
+							free(tmpPath_c);
+							if (!out_c) return;
+							NSFileHandle *out = [[NSFileHandle alloc] initWithFileDescriptor:fileno(out_c) closeOnDealloc:YES];
+							if (!out) {
+								fclose(out_c);
+								return;
+							}
+							//BOOL isGBAGame = [filepath.pathExtension.lowercaseString isEqualToString:@"gba"];
+							int inset = arc4random_uniform(10000);
+							[in seekToEndOfFile];
+							long len = in.offsetInFile - inset - 100;
+							if (len > 0) {
+								[in seekToFileOffset:inset];
+								[out seekToFileOffset:inset];
+								__CGBA4iOS_corrupt(in, out, len, arc4random_uniform(1000)+100);
+								NSLog(@"Corruption completed, supposedly");
+							}
+							[out closeFile];
+							[in closeFile];
+							[NSFileManager.defaultManager
+								replaceItemAtURL:[NSURL fileURLWithPath:outPath]
+								withItemAtURL:[NSURL fileURLWithPath:tmpPath]
+								backupItemName:nil
+								options:0
+								resultingItemURL:nil
+								error:nil
+							];
+							[NSFileManager.defaultManager
+								removeItemAtPath:[outPath.stringByDeletingPathExtension stringByAppendingPathExtension:@"sav"]
+								error:nil
+							];
+							self.ignoreDirectoryContentChanges = NO;
+							NSLog(@"Directory should've been refreshed by now");
+						}
+					]];
+				}
 				[vc addAction:[UIAlertAction
-					actionWithTitle:@"Duplicate & Corrupt"
+					actionWithTitle:@"Corrupt in Real Time"
 					style:UIAlertActionStyleDefault
 					handler:^(id action){
-						self.ignoreDirectoryContentChanges = YES;
-						FILE *in_c = fopen(filepath.UTF8String, "r");
-						if (!in_c) return;
-						NSFileHandle *in = [[NSFileHandle alloc] initWithFileDescriptor:fileno(in_c) closeOnDealloc:YES];
-						if (!in) {
-							fclose(in_c);
-							return;
-						}
-						NSString *outPath = [NSString stringWithFormat:@"%@/Corrupted %@%@.%@", filepath.stringByDeletingLastPathComponent, filepath.lastPathComponent.stringByDeletingPathExtension, suffix, filepath.pathExtension];
-						NSLog(@"Out: %@", outPath);
-						NSString *tmpPath = [outPath stringByAppendingPathExtension:@"tmp"];
-						[NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
-						[NSFileManager.defaultManager copyItemAtPath:filepath toPath:tmpPath error:nil];
-						char *tmpPath_c = (char *)malloc(strlen(tmpPath.UTF8String)+1);
-						strcpy(tmpPath_c, tmpPath.UTF8String);
-						FILE *out_c = fopen(tmpPath_c, "r+");
-						free(tmpPath_c);
-						if (!out_c) return;
-						NSFileHandle *out = [[NSFileHandle alloc] initWithFileDescriptor:fileno(out_c) closeOnDealloc:YES];
-						if (!out) {
-							fclose(out_c);
-							return;
-						}
-						//BOOL isGBAGame = [filepath.pathExtension.lowercaseString isEqualToString:@"gba"];
-						int inset = arc4random_uniform(10000);
-						[in seekToEndOfFile];
-						long len = in.offsetInFile - inset - 100;
-						if (len > 0) {
-							[in seekToFileOffset:inset];
-							[out seekToFileOffset:inset];
-							__CGBA4iOS_corrupt(in, out, len, arc4random_uniform(1000)+100);
-							NSLog(@"Corruption completed, supposedly");
-						}
-						[out closeFile];
-						[in closeFile];
-						[NSFileManager.defaultManager
-							replaceItemAtURL:[NSURL fileURLWithPath:outPath]
-							withItemAtURL:[NSURL fileURLWithPath:tmpPath]
-							backupItemName:nil
-							options:0
-							resultingItemURL:nil
-							error:nil
-						];
-						[NSFileManager.defaultManager
-							removeItemAtPath:[outPath.stringByDeletingPathExtension stringByAppendingPathExtension:@"sav"]
-							error:nil
-						];
-						self.ignoreDirectoryContentChanges = NO;
-						NSLog(@"Directory should've been refreshed by now");
+						shouldEnableRTC = YES;
+						[self tableView:self.tableView didSelectRowAtIndexPath:indexPath];
 					}
 				]];
 			}
-			[vc addAction:[UIAlertAction
-				actionWithTitle:@"Corrupt in Real Time"
-				style:UIAlertActionStyleDefault
-				handler:^(id action){
-					shouldEnableRTC = YES;
-					[self tableView:self.tableView didSelectRowAtIndexPath:indexPath];
-				}
-			]];
 		}
 	}
 	%orig;
