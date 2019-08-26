@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import "memptrs.h"
 
 #if DEBUG
 #define NSLog(args...) NSLog(@"[CGBA] "args)
@@ -7,9 +8,19 @@
 #endif
 #define min(a,b) ((a<b)?a:b)
 
+#define GetVRAMSize(memptrs) 0x4000
+#define GetVRAMDataPt(memptrs) (memptrs->rambankdata_ - GetVRAMSize(memptrs))
+#define GetRAMDataPt(memptrs) memptrs->rambankdata_
+#define GetRAMSize(memptrs) (memptrs->wramdata_[0] - GetRAMDataPt(memptrs))
+#define GetROMDataPt(memptrs) (memptrs->memchunk_ + 0x4000)
+#define GetROMSize(memptrs) (GetVRAMDataPt(memptrs) - GetROMDataPt(memptrs))
+
 static NSSet *expectedTitlesSet;
 static NSIndexPath *cellIndexPath;
 static NSString *suffix;
+static gambatte::MemPtrs *memptrs = NULL;
+static BOOL RTCEnabled = NO;
+static BOOL shouldEnableRTC = NO;
 typedef void(^RSTAlertViewSelectionHandler)(UIAlertView *alertView, NSInteger buttonIndex);
 
 @interface RSTFileBrowserViewController : UITableViewController
@@ -18,7 +29,7 @@ typedef void(^RSTAlertViewSelectionHandler)(UIAlertView *alertView, NSInteger bu
 - (void)setIgnoreDirectoryContentChanges:(BOOL)ignoreDirectoryContentChanges;
 @end
 
-@interface GBAROMTableViewController : RSTFileBrowserViewController
+@interface GBAROMTableViewController : RSTFileBrowserViewController<UITableViewDelegate>
 @end
 
 static void __CGBA4iOS_corrupt(NSFileHandle *in, NSFileHandle *out, long len, long skip) {
@@ -36,6 +47,29 @@ static void __CGBA4iOS_corrupt(NSFileHandle *in, NSFileHandle *out, long len, lo
 	NSLog(@"Got to end");
 }
 
+static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
+	if (!memptrs) return;
+	long size = GetVRAMSize(memptrs);
+	if (!size) return;
+	NSPointerArray *ptArray = [NSPointerArray pointerArrayWithOptions:(NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality)];
+#define add(pt) [ptArray addPointer:(void *)pt]
+	add(GetROMDataPt(memptrs));
+	add(GetROMSize(memptrs));
+	add(GetVRAMDataPt(memptrs));
+	add(GetVRAMSize(memptrs));
+	add(GetRAMDataPt(memptrs));
+	add(GetRAMSize(memptrs));
+#undef add
+	for (unsigned char ptIndex = 0; ptIndex < ptArray.count; ptIndex+=2) {
+		unsigned char *data = (unsigned char *)[ptArray pointerAtIndex:ptIndex];
+		long size = (long)[ptArray pointerAtIndex:ptIndex+1];
+		if (!data || !size) continue;
+		for (unsigned char i = 0; i < 3; i++) {
+			data[arc4random_uniform(size - 1)] = (unsigned char)arc4random_uniform(255);
+		}
+	}
+}
+
 %hook GBAROMTableViewController
 
 - (void)didDetectLongPressGesture:(UILongPressGestureRecognizer *)gestureRecognizer {
@@ -49,10 +83,11 @@ static void __CGBA4iOS_corrupt(NSFileHandle *in, NSFileHandle *out, long len, lo
 		NSMutableSet *inputSet = [NSMutableSet setWithArray:[vc.actions valueForKeyPath:@"title"]];
 		[inputSet intersectSet:expectedTitlesSet];
 		if (inputSet.count == expectedTitlesSet.count) {
-			NSString *filepath = [self filepathForIndexPath:cellIndexPath];
+			NSIndexPath *indexPath = cellIndexPath;
+			NSString *filepath = [self filepathForIndexPath:indexPath];
 			if (![[filepath stringByDeletingPathExtension] hasSuffix:suffix]) {
 				[vc addAction:[UIAlertAction
-					actionWithTitle:@"Corrupt Game"
+					actionWithTitle:@"Duplicate & Corrupt"
 					style:UIAlertActionStyleDefault
 					handler:^(id action){
 						self.ignoreDirectoryContentChanges = YES;
@@ -68,7 +103,7 @@ static void __CGBA4iOS_corrupt(NSFileHandle *in, NSFileHandle *out, long len, lo
 						NSString *tmpPath = [outPath stringByAppendingPathExtension:@"tmp"];
 						[NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
 						[NSFileManager.defaultManager copyItemAtPath:filepath toPath:tmpPath error:nil];
-						char *tmpPath_c = malloc(strlen(tmpPath.UTF8String)+1);
+						char *tmpPath_c = (char *)malloc(strlen(tmpPath.UTF8String)+1);
 						strcpy(tmpPath_c, tmpPath.UTF8String);
 						FILE *out_c = fopen(tmpPath_c, "r+");
 						free(tmpPath_c);
@@ -107,8 +142,22 @@ static void __CGBA4iOS_corrupt(NSFileHandle *in, NSFileHandle *out, long len, lo
 					}
 				]];
 			}
+			[vc addAction:[UIAlertAction
+				actionWithTitle:@"Corrupt in Real Time"
+				style:UIAlertActionStyleDefault
+				handler:^(id action){
+					shouldEnableRTC = YES;
+					[self tableView:self.tableView didSelectRowAtIndexPath:indexPath];
+				}
+			]];
 		}
 	}
+	%orig;
+}
+
+- (void)startROM:(id)rom showSameROMAlertIfNeeded:(BOOL)showSameROMAlertIfNeeded {
+	RTCEnabled = shouldEnableRTC;
+	shouldEnableRTC = NO;
 	%orig;
 }
 
@@ -152,6 +201,16 @@ static void __CGBA4iOS_corrupt(NSFileHandle *in, NSFileHandle *out, long len, lo
 
 %end
 
+%hookf(void, "__ZN8gambatte7MemPtrs10setRambankEjj", gambatte::MemPtrs *self, unsigned ramFlags, unsigned rambank) {
+	%orig;
+	memptrs = self;
+}
+
+%hookf(unsigned short, "__ZN8gambatte7MemPtrsD1Ev", gambatte::MemPtrs *self) {
+	memptrs = NULL;
+	return %orig;
+}
+
 %ctor {
 	expectedTitlesSet = [NSSet setWithArray:@[
 		NSLocalizedString(@"Cancel", @""),
@@ -164,4 +223,11 @@ static void __CGBA4iOS_corrupt(NSFileHandle *in, NSFileHandle *out, long len, lo
 	}
 	buffer[4] = 0;
 	suffix = @(buffer);
+	// Up to 3 bytes are corrupted in each type of memory every second. Even this can be really powerful.
+	[NSTimer scheduledTimerWithTimeInterval:1.0
+		repeats:YES
+		block:^(NSTimer *timer){
+			if (RTCEnabled) __CGBA4iOS_RTC_tick(timer);
+		}
+	];
 }
