@@ -21,6 +21,7 @@ static NSString *suffix;
 static gambatte::MemPtrs *memptrs = NULL;
 static BOOL RTCEnabled = NO;
 static BOOL shouldEnableRTC = NO;
+static unsigned char *GBAPointers[3];
 typedef void(^RSTAlertViewSelectionHandler)(UIAlertView *alertView, NSInteger buttonIndex);
 
 @interface RSTFileBrowserViewController : UITableViewController
@@ -48,23 +49,31 @@ static void __CGBA4iOS_corrupt(NSFileHandle *in, NSFileHandle *out, long len, lo
 }
 
 static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
-	if (!memptrs) return;
+	if (!memptrs && !GBAPointers[0]) return;
 	long size = GetVRAMSize(memptrs);
 	if (!size) return;
 	NSPointerArray *ptArray = [NSPointerArray pointerArrayWithOptions:(NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality)];
-#define add(pt) [ptArray addPointer:(void *)pt]
-	add(GetROMDataPt(memptrs));
-	add(GetROMSize(memptrs));
-	add(GetVRAMDataPt(memptrs));
-	add(GetVRAMSize(memptrs));
-	add(GetRAMDataPt(memptrs));
-	add(GetRAMSize(memptrs));
+#define _add(pt) [ptArray addPointer:(void *)pt]
+#define add(pt, size, count) {_add(pt); _add(size); _add(count);}
+	if (memptrs) {
+		// I'm not sure if I should be corrupting the ROM but the corruptions are better this way so I'll keep it
+		add(GetROMDataPt(memptrs), GetROMSize(memptrs), 3);
+		add(GetVRAMDataPt(memptrs), GetVRAMSize(memptrs), 5);
+		add(GetRAMDataPt(memptrs), GetRAMSize(memptrs), 3);
+	}
+	if (GBAPointers[0]) {
+		add(GBAPointers[0], 0x40000, 10);
+		add(GBAPointers[1], 0x20000, 10);
+		add(GBAPointers[2], 0x400, 5);
+	}
 #undef add
-	for (unsigned char ptIndex = 0; ptIndex < ptArray.count; ptIndex+=2) {
+#undef _add
+	for (unsigned char ptIndex = 0; ptIndex < ptArray.count; ptIndex+=3) {
 		unsigned char *data = (unsigned char *)[ptArray pointerAtIndex:ptIndex];
 		long size = (long)[ptArray pointerAtIndex:ptIndex+1];
+		long count = (long)[ptArray pointerAtIndex:ptIndex+2];
 		if (!data || !size) continue;
-		for (unsigned char i = 0; i < 3; i++) {
+		for (long i = 0; i < count; i++) {
 			data[arc4random_uniform(size - 1)] = (unsigned char)arc4random_uniform(255);
 		}
 	}
@@ -203,14 +212,41 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 
 %end
 
+#pragma mark - Hooks for GBC real time corruption
+
 %hookf(void, "__ZN8gambatte7MemPtrs10setRambankEjj", gambatte::MemPtrs *self, unsigned ramFlags, unsigned rambank) {
 	%orig;
 	memptrs = self;
 }
 
-%hookf(unsigned short, "__ZN8gambatte7MemPtrsD1Ev", gambatte::MemPtrs *self) {
+%hookf(bool, "__ZN8gambatte7MemPtrsD1Ev", gambatte::MemPtrs *self) {
 	memptrs = NULL;
 	return %orig;
+}
+
+%hookf(void, "__ZN9EmuSystem15closeSystem_GBCEv", unsigned char *self) {
+	memptrs = NULL;
+	%orig;
+}
+
+#pragma mark - Hooks for GBA real time corruption
+
+%hookf(bool, "__Z18CPUReadBatteryFileR6GBASysPKc", unsigned char& gba, char const *filename) {
+	bool result;
+	GBAPointers[0] = NULL;
+	if ((result = %orig)) {
+		unsigned char *gbaPt = &gba;
+		int diff = ((sizeof(void *) == 4) * 2064);
+		GBAPointers[0] = gbaPt + 271624 - (diff ? (diff + 8) : 0); // Work RAM
+		GBAPointers[1] = gbaPt + 88152 - diff; // Video RAM (2064 diff)
+		GBAPointers[2] = gbaPt + 219224 - diff; // Palette RAM (2064 diff)
+	}
+	return result;
+}
+
+%hookf(void, "__ZN9EmuSystem15closeSystem_GBAEv", unsigned char *self) {
+	GBAPointers[0] = NULL;
+	%orig;
 }
 
 %ctor {
@@ -219,6 +255,7 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 		NSLocalizedString(@"Rename Game", @""),
 		NSLocalizedString(@"Share Game", @"")
 	]];
+	GBAPointers[0] = NULL;
 	char buffer[5];
 	for (unsigned char i=0; i<=3; i++) {
 		buffer[i] = i+0x11;
