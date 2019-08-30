@@ -15,7 +15,8 @@
 #define GetROMDataPt(memptrs) (memptrs->memchunk_ + 0x4000)
 #define GetROMSize(memptrs) (GetVRAMDataPt(memptrs) - GetROMDataPt(memptrs))
 
-static NSSet *expectedTitlesSet;
+static NSSet *expectedMainVCTitlesSet;
+static NSSet *expectedGameMenuTitlesSet;
 static NSIndexPath *romCellIndexPath = NULL;
 static NSIndexPath *saveStateCellIndexPath = NULL;
 static __kindof UITableViewController * __weak saveStateViewController;
@@ -69,6 +70,32 @@ static void __CGBA4iOS_corrupt(NSFileHandle *out, long len, long skip) {
 	}
 }
 
+static void __CGBA4iOS_handle_game_menu_button(UIActionSheet *self, RSTActionSheetSelectionHandler *modifiedHandler) {
+	RSTActionSheetSelectionHandler originalHandler = *modifiedHandler;
+	NSLog(@"Handling game view controller menu button");
+	NSMutableSet *inputSet = [NSMutableSet new];
+	for (int i=0; i<self.numberOfButtons; i++) {
+		if (i != self.cancelButtonIndex) {
+			NSString *title = [self buttonTitleAtIndex:i];
+			NSLog(@"New button: %@", title);
+			[inputSet addObject:title];
+		}
+	}
+	NSLog(@"Intersecting set: %@", inputSet);
+	NSLog(@"With set: %@", expectedGameMenuTitlesSet);
+	[inputSet intersectSet:expectedGameMenuTitlesSet];
+	NSLog(@"Comparing set counts (%ld and %ld)", (long)inputSet.count, (long)expectedGameMenuTitlesSet.count);
+	if (expectedGameMenuTitlesSet.count == inputSet.count) {
+		NSInteger newButtonIndex = [self addButtonWithTitle:[(RTCEnabled ? @"Disable" : @"Enable") stringByAppendingString:@" Real-Time Corruption"]];
+		*modifiedHandler = ^(UIActionSheet *actionSheet, NSInteger buttonIndex) {
+			originalHandler(actionSheet, buttonIndex);
+			if (buttonIndex == newButtonIndex) {
+				RTCEnabled = !RTCEnabled;
+			}
+		};
+	}
+}
+
 static BOOL __CGBA4iOS_corrupt_path(NSString *path, int minSkip, int maxSkip) {
 #define return return NO
 	FILE *out_c = fopen(path.UTF8String, "r+");
@@ -96,7 +123,7 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 	long size = GetVRAMSize(memptrs);
 	if (!size) return;
 	NSPointerArray *ptArray = [NSPointerArray pointerArrayWithOptions:(NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality)];
-#define _add(pt) [ptArray addPointer:(void *)pt]
+#define _add(pt) [ptArray addPointer:(void *)(pt)]
 #define add(pt, size, count) {_add(pt); _add(size); _add(count);}
 	if (memptrs) {
 		// I'm not sure if I should be corrupting the ROM but the corruptions are better this way so I'll keep it
@@ -105,8 +132,9 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 		add(GetRAMDataPt(memptrs), GetRAMSize(memptrs), 3);
 	}
 	if (GBAPointers[0]) {
-		add(GBAPointers[0], 0x40000, 10);
-		add(GBAPointers[1], 0x20000, 10);
+		// You can never corrupt enough
+		add(GBAPointers[0], 0x40000, 0x20);
+		add(GBAPointers[1], 0x20000, 0x20);
 		add(GBAPointers[2], 0x400, 5);
 	}
 #undef add
@@ -133,12 +161,12 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 - (void)presentViewController:(UIAlertController *)vc animated:(BOOL)animated completion:(void(^)(void))completion {
 	if ([vc isKindOfClass:[UIAlertController class]]) {
 		NSMutableSet *inputSet = [NSMutableSet setWithArray:[vc.actions valueForKeyPath:@"title"]];
-		[inputSet intersectSet:expectedTitlesSet];
-		if (inputSet.count == expectedTitlesSet.count) {
+		[inputSet intersectSet:expectedMainVCTitlesSet];
+		if (inputSet.count == expectedMainVCTitlesSet.count) {
 			NSIndexPath *indexPath = romCellIndexPath;
 			NSString *filepath = [self filepathForIndexPath:indexPath];
-			if (![[filepath.pathExtension lowercaseString] isEqualToString:@"zip"]) {
-				if (![[filepath stringByDeletingPathExtension] hasSuffix:suffix]) {
+			if (![filepath.pathExtension.lowercaseString isEqualToString:@"zip"]) {
+				if (![[filepath stringByDeletingPathExtension] hasSuffix:suffix] && ![filepath.pathExtension.lowercaseString isEqualToString:@"gba"]) {
 					[vc addAction:[UIAlertAction
 						actionWithTitle:@"Duplicate & Corrupt"
 						style:UIAlertActionStyleDefault
@@ -228,34 +256,51 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 
 %hook UIActionSheet
 
+- (void)showInView:(UIView *)view selectionHandler:(RSTActionSheetSelectionHandler)completionHandler {
+	RSTActionSheetSelectionHandler modifiedHandler = completionHandler;
+	__CGBA4iOS_handle_game_menu_button(self, &modifiedHandler);
+	%orig(view, modifiedHandler);
+}
+
 - (void)showFromRect:(CGRect)rect inView:(UIView *)view animated:(BOOL)animated selectionHandler:(RSTActionSheetSelectionHandler)completionHandler {
+	NSLog(@"-[%@ %@]", NSStringFromClass(self.class), NSStringFromSelector(_cmd));
 	RSTActionSheetSelectionHandler modifiedHandler = completionHandler;
 	if ([[self buttonTitleAtIndex:[self firstOtherButtonIndex]] isEqualToString:NSLocalizedString(@"Rename Save State", @"")] &&
 		(view == saveStateViewController.tableView) &&
 		CGRectEqualToRect(rect, [saveStateViewController.tableView rectForRowAtIndexPath:saveStateCellIndexPath]))
 	{
+		NSLog(@"Handling save state cell");
 		NSIndexPath *indexPath = saveStateCellIndexPath;
-		NSInteger newButtonIndex = [self addButtonWithTitle:@"Load and Corrupt State"];
-		modifiedHandler = ^(UIActionSheet *actionSheet, NSInteger buttonIndex) {
-			NSLog(@"Got %ld, expected %ld", (long)buttonIndex, (long)newButtonIndex);
-			if (buttonIndex == newButtonIndex) {
-				GBASaveStateViewController *vc = [view _viewControllerForAncestor];
-				NSString *filePath = vc.saveStateArray[indexPath.section][indexPath.row][@"filepath"];
-				NSLog(@"File path: %@", filePath);
-				NSLog(@"VC: %@", vc);
-				if (!filePath) return;
-				NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
-				NSLog(@"TMP Path: %@", tmpPath);
-				[NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
-				if (![NSFileManager.defaultManager copyItemAtPath:filePath toPath:tmpPath error:nil]) return;
-				if (__CGBA4iOS_corrupt_path(tmpPath, 50, 100)) {
-					[[%c(GBAEmulatorCore) sharedCore] loadStateFromFilepath:tmpPath];
+		GBASaveStateViewController *vc = [view _viewControllerForAncestor];
+		NSString *filePath = vc.saveStateArray[indexPath.section][indexPath.row][@"filepath"];
+		NSArray<NSString *> *pathComponents = filePath.pathComponents;
+		NSString *docDir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+		if (((pathComponents.count < 2) || !docDir) || ![NSFileManager.defaultManager fileExistsAtPath:[[docDir stringByAppendingPathComponent:pathComponents[pathComponents.count - 2]] stringByAppendingPathExtension:@"gba"]]) {
+			NSInteger newButtonIndex = [self addButtonWithTitle:@"Load and Corrupt State"];
+			modifiedHandler = ^(UIActionSheet *actionSheet, NSInteger buttonIndex) {
+				NSLog(@"Got %ld, expected %ld", (long)buttonIndex, (long)newButtonIndex);
+				if (buttonIndex == newButtonIndex) {
+					GBASaveStateViewController *vc = [view _viewControllerForAncestor];
+					NSString *filePath = vc.saveStateArray[indexPath.section][indexPath.row][@"filepath"];
+					NSLog(@"File path: %@", filePath);
+					NSLog(@"VC: %@", vc);
+					if (!filePath) return;
+					NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+					NSLog(@"TMP Path: %@", tmpPath);
+					[NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
+					if (![NSFileManager.defaultManager copyItemAtPath:filePath toPath:tmpPath error:nil]) return;
+					if (__CGBA4iOS_corrupt_path(tmpPath, 50, 100)) {
+						[[%c(GBAEmulatorCore) sharedCore] loadStateFromFilepath:tmpPath];
+					}
+					[NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
+					[vc dismissSaveStateViewController:nil];
 				}
-				[NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
-				[vc dismissSaveStateViewController:nil];
-			}
-			else completionHandler(actionSheet, buttonIndex);
-		};
+				else completionHandler(actionSheet, buttonIndex);
+			};
+		}
+	}
+	else {
+		__CGBA4iOS_handle_game_menu_button(self, &modifiedHandler);
 	}
 	%orig(rect, view, animated, modifiedHandler);
 }
@@ -314,10 +359,16 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 }
 
 %ctor {
-	expectedTitlesSet = [NSSet setWithArray:@[
+	expectedMainVCTitlesSet = [NSSet setWithArray:@[
 		NSLocalizedString(@"Cancel", @""),
 		NSLocalizedString(@"Rename Game", @""),
 		NSLocalizedString(@"Share Game", @"")
+	]];
+	expectedGameMenuTitlesSet = [NSSet setWithArray:@[
+		NSLocalizedString(@"Save State", @""),
+		NSLocalizedString(@"Load State", @""),
+		NSLocalizedString(@"Cheat Codes", @""),
+		NSLocalizedString(@"Sustain Button", @"")
 	]];
 	GBAPointers[0] = NULL;
 	char buffer[5];
