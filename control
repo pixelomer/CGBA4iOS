@@ -1,13 +1,17 @@
 Package: com.pixelomer.cgba4ios
 Name: CGBA4iOS
 Depends: mobilesubstrate, firmware (>=8.0)
-Version: 1.2
+Version: 1.3
 Architecture: iphoneos-arm
 Description: Corrupt GameBoy games using GBA4iOS
-  This is a tweak that lets you corrupt GameBoy games using GBA4iOS. Just hold the game you want to corrupt and press "Corrupt Game".
-  The tweak can be used for both corrupting in real time and for duplicating and corrupting a ROM.
-  ROM corruption doesn't work well with GBA games. However, real time corruption does work fine.
-  Requires iOS 8.0 or higher.
+  Features (all): 
+  - Real-time corruption of games: Corrupt games slowly while they are running. Can be activated while the game is running using the menu button. A game can be started with real time corruption enabled by holding the game and pressing "Corrupt in Real Time".
+  .
+  Features (GBC and GB only):
+  - ROM duplication & corruption: Allows you to corrupt the ROM files themselves. The original file will not be corrupted. An exact copy of the ROM will be created with the CGB(X) extension and that will be corrupted. 
+  - Savestate corruption: Allows you to corrupt save states of games. This will modify the RAM of the emulated GameBoy. To use, hold a game in the "Load State" menu and press "Load and Corrupt State".
+  .
+  Requires iOS 8.0 or higher. Real-time corruption of GBA games was not tested on 32-bit devices.
 Maintainer: PixelOmer
 Author: PixelOmer
 Section: Tweaks
