@@ -16,36 +16,79 @@
 #define GetROMSize(memptrs) (GetVRAMDataPt(memptrs) - GetROMDataPt(memptrs))
 
 static NSSet *expectedTitlesSet;
-static NSIndexPath *cellIndexPath;
+static NSIndexPath *romCellIndexPath = NULL;
+static NSIndexPath *saveStateCellIndexPath = NULL;
+static __kindof UITableViewController * __weak saveStateViewController;
 static NSString *suffix;
 static gambatte::MemPtrs *memptrs = NULL;
 static BOOL RTCEnabled = NO;
 static BOOL shouldEnableRTC = NO;
 static unsigned char *GBAPointers[3];
-typedef void(^RSTAlertViewSelectionHandler)(UIAlertView *alertView, NSInteger buttonIndex);
 
-@interface RSTFileBrowserViewController : UITableViewController
+typedef void(^RSTActionSheetSelectionHandler)(UIActionSheet *actionSheet, NSInteger buttonIndex);
+typedef void(^RSTAlertViewSelectionHandler)(UIAlertView *alertView, NSInteger buttonIndex);
+typedef NS_ENUM(NSInteger, GBASaveStateViewControllerMode)
+{
+    GBASaveStateViewControllerModeSaving = 0,
+    GBASaveStateViewControllerModeLoading = 1
+};
+
+@interface RSTFileBrowserViewController : UITableViewController<UITableViewDelegate>
 - (NSString *)filepathForIndexPath:(NSIndexPath *)path;
 - (void)refreshDirectory;
 - (void)setIgnoreDirectoryContentChanges:(BOOL)ignoreDirectoryContentChanges;
 @end
 
-@interface GBAROMTableViewController : RSTFileBrowserViewController<UITableViewDelegate>
+@interface GBAROMTableViewController : RSTFileBrowserViewController
 @end
 
-static void __CGBA4iOS_corrupt(NSFileHandle *in, NSFileHandle *out, long len, long skip) {
+@interface GBASaveStateViewController : UITableViewController
+- (NSArray<NSArray<NSDictionary *> *> *)saveStateArray;
+- (GBASaveStateViewControllerMode)mode;
+- (void)dismissSaveStateViewController:(UIBarButtonItem *)unused;
+@end
+
+@interface UIView(Private)
+- (__kindof UIViewController *)_viewControllerForAncestor;
+@end
+
+@interface GBAEmulatorCore : NSObject
++ (instancetype)sharedCore;
+- (void)loadStateFromFilepath:(NSString *)path;
+@end
+
+static void __CGBA4iOS_corrupt(NSFileHandle *out, long len, long skip) {
 	NSData *data;
 	for (long i = 0; i < len; i+=skip) {
 		unsigned char byte = (unsigned char)arc4random_uniform(255);
 		data = [NSData dataWithBytes:&byte length:1];
 		[out writeData:data];
-		[in seekToFileOffset:out.offsetInFile];
 		if (skip-1) {
-			data = [in readDataOfLength:min(len-i,skip-1)];
-			[out writeData:data];
+			[out seekToFileOffset:(out.offsetInFile+min(len-i,skip-1))];
 		}
 	}
-	NSLog(@"Got to end");
+}
+
+static BOOL __CGBA4iOS_corrupt_path(NSString *path, int minSkip, int maxSkip) {
+#define return return NO
+	FILE *out_c = fopen(path.UTF8String, "r+");
+	if (!out_c) return;
+	NSFileHandle *out = [[NSFileHandle alloc] initWithFileDescriptor:fileno(out_c) closeOnDealloc:YES];
+	if (!out) {
+		fclose(out_c);
+		return;
+	}
+	int inset = arc4random_uniform(10000);
+	[out seekToEndOfFile];
+	long len = out.offsetInFile - inset - 100;
+	if (len > 0) {
+		[out seekToFileOffset:inset];
+		__CGBA4iOS_corrupt(out, len, arc4random_uniform(maxSkip-minSkip)+minSkip);
+		NSLog(@"Corruption completed... I think");
+	}
+	[out closeFile];
+#undef return
+	return YES;
 }
 
 static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
@@ -82,9 +125,9 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 %hook GBAROMTableViewController
 
 - (void)didDetectLongPressGesture:(UILongPressGestureRecognizer *)gestureRecognizer {
-	cellIndexPath = [self.tableView indexPathForCell:(id)[gestureRecognizer view]];
+	romCellIndexPath = [self.tableView indexPathForCell:(id)[gestureRecognizer view]];
 	%orig;
-	cellIndexPath = nil;
+	romCellIndexPath = nil;
 }
 
 - (void)presentViewController:(UIAlertController *)vc animated:(BOOL)animated completion:(void(^)(void))completion {
@@ -92,7 +135,7 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 		NSMutableSet *inputSet = [NSMutableSet setWithArray:[vc.actions valueForKeyPath:@"title"]];
 		[inputSet intersectSet:expectedTitlesSet];
 		if (inputSet.count == expectedTitlesSet.count) {
-			NSIndexPath *indexPath = cellIndexPath;
+			NSIndexPath *indexPath = romCellIndexPath;
 			NSString *filepath = [self filepathForIndexPath:indexPath];
 			if (![[filepath.pathExtension lowercaseString] isEqualToString:@"zip"]) {
 				if (![[filepath stringByDeletingPathExtension] hasSuffix:suffix]) {
@@ -101,40 +144,12 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 						style:UIAlertActionStyleDefault
 						handler:^(id action){
 							self.ignoreDirectoryContentChanges = YES;
-							FILE *in_c = fopen(filepath.UTF8String, "r");
-							if (!in_c) return;
-							NSFileHandle *in = [[NSFileHandle alloc] initWithFileDescriptor:fileno(in_c) closeOnDealloc:YES];
-							if (!in) {
-								fclose(in_c);
-								return;
-							}
 							NSString *outPath = [NSString stringWithFormat:@"%@/Corrupted %@%@.%@", filepath.stringByDeletingLastPathComponent, filepath.lastPathComponent.stringByDeletingPathExtension, suffix, filepath.pathExtension];
 							NSLog(@"Out: %@", outPath);
 							NSString *tmpPath = [outPath stringByAppendingPathExtension:@"tmp"];
 							[NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
 							[NSFileManager.defaultManager copyItemAtPath:filepath toPath:tmpPath error:nil];
-							char *tmpPath_c = (char *)malloc(strlen(tmpPath.UTF8String)+1);
-							strcpy(tmpPath_c, tmpPath.UTF8String);
-							FILE *out_c = fopen(tmpPath_c, "r+");
-							free(tmpPath_c);
-							if (!out_c) return;
-							NSFileHandle *out = [[NSFileHandle alloc] initWithFileDescriptor:fileno(out_c) closeOnDealloc:YES];
-							if (!out) {
-								fclose(out_c);
-								return;
-							}
-							//BOOL isGBAGame = [filepath.pathExtension.lowercaseString isEqualToString:@"gba"];
-							int inset = arc4random_uniform(10000);
-							[in seekToEndOfFile];
-							long len = in.offsetInFile - inset - 100;
-							if (len > 0) {
-								[in seekToFileOffset:inset];
-								[out seekToFileOffset:inset];
-								__CGBA4iOS_corrupt(in, out, len, arc4random_uniform(1000)+100);
-								NSLog(@"Corruption completed, supposedly");
-							}
-							[out closeFile];
-							[in closeFile];
+							__CGBA4iOS_corrupt_path(tmpPath, 100, 1000);
 							[NSFileManager.defaultManager
 								replaceItemAtURL:[NSURL fileURLWithPath:outPath]
 								withItemAtURL:[NSURL fileURLWithPath:tmpPath]
@@ -189,7 +204,6 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 
 %hook UIAlertView
 
-// Not a standard UIAlertView method, this is an extension
 - (void)showWithSelectionHandler:(RSTAlertViewSelectionHandler)selectionHandler {
 	if ([self.title isEqualToString:NSLocalizedString(@"Rename Game", @"")] &&
 		[[self buttonTitleAtIndex:self.cancelButtonIndex] isEqualToString:NSLocalizedString(@"Cancel", @"")] &&
@@ -208,6 +222,56 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 		}
 	}
 	%orig;
+}
+
+%end
+
+%hook UIActionSheet
+
+- (void)showFromRect:(CGRect)rect inView:(UIView *)view animated:(BOOL)animated selectionHandler:(RSTActionSheetSelectionHandler)completionHandler {
+	RSTActionSheetSelectionHandler modifiedHandler = completionHandler;
+	if ([[self buttonTitleAtIndex:[self firstOtherButtonIndex]] isEqualToString:NSLocalizedString(@"Rename Save State", @"")] &&
+		(view == saveStateViewController.tableView) &&
+		CGRectEqualToRect(rect, [saveStateViewController.tableView rectForRowAtIndexPath:saveStateCellIndexPath]))
+	{
+		NSIndexPath *indexPath = saveStateCellIndexPath;
+		NSInteger newButtonIndex = [self addButtonWithTitle:@"Load and Corrupt State"];
+		modifiedHandler = ^(UIActionSheet *actionSheet, NSInteger buttonIndex) {
+			NSLog(@"Got %ld, expected %ld", (long)buttonIndex, (long)newButtonIndex);
+			if (buttonIndex == newButtonIndex) {
+				GBASaveStateViewController *vc = [view _viewControllerForAncestor];
+				NSString *filePath = vc.saveStateArray[indexPath.section][indexPath.row][@"filepath"];
+				NSLog(@"File path: %@", filePath);
+				NSLog(@"VC: %@", vc);
+				if (!filePath) return;
+				NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+				NSLog(@"TMP Path: %@", tmpPath);
+				[NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
+				if (![NSFileManager.defaultManager copyItemAtPath:filePath toPath:tmpPath error:nil]) return;
+				if (__CGBA4iOS_corrupt_path(tmpPath, 50, 100)) {
+					[[%c(GBAEmulatorCore) sharedCore] loadStateFromFilepath:tmpPath];
+				}
+				[NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
+				[vc dismissSaveStateViewController:nil];
+			}
+			else completionHandler(actionSheet, buttonIndex);
+		};
+	}
+	%orig(rect, view, animated, modifiedHandler);
+}
+
+%end
+
+%hook GBASaveStateViewController
+
+- (void)didDetectLongPressGesture:(UILongPressGestureRecognizer *)gestureRecognizer {
+	if (self.mode == GBASaveStateViewControllerModeLoading) {
+		saveStateCellIndexPath = [self.tableView indexPathForCell:(id)[gestureRecognizer view]];
+		saveStateViewController = self;
+	}
+	%orig;
+	saveStateCellIndexPath = nil;
+	saveStateViewController = nil;
 }
 
 %end
@@ -237,9 +301,9 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 	if ((result = %orig)) {
 		unsigned char *gbaPt = &gba;
 		int diff = ((sizeof(void *) == 4) * 2064);
-		GBAPointers[0] = gbaPt + 271624 - (diff ? (diff + 8) : 0); // Work RAM
-		GBAPointers[1] = gbaPt + 88152 - diff; // Video RAM (2064 diff)
-		GBAPointers[2] = gbaPt + 219224 - diff; // Palette RAM (2064 diff)
+		GBAPointers[0] = gbaPt + 271624 - (diff ? (diff + 8) : 0);
+		GBAPointers[1] = gbaPt + 88152 - diff;
+		GBAPointers[2] = gbaPt + 219224 - diff;
 	}
 	return result;
 }
@@ -262,7 +326,6 @@ static void __CGBA4iOS_RTC_tick(NSTimer *timer) {
 	}
 	buffer[4] = 0;
 	suffix = @(buffer);
-	// Up to 3 bytes are corrupted in each type of memory every second. Even this can be really powerful.
 	[NSTimer scheduledTimerWithTimeInterval:1.0
 		repeats:YES
 		block:^(NSTimer *timer){
